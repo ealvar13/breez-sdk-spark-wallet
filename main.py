@@ -1,5 +1,6 @@
 import os, asyncio
-from breez_sdk_spark import Seed, default_config, Network, connect, ConnectRequest
+from breez_sdk_spark import Seed, default_config, Network, connect, \
+    ConnectRequest, BreezSdk
 
 from dotenv import load_dotenv
 
@@ -25,9 +26,20 @@ async def connect_sdk():
         print(error)
         raise
 
-connection = asyncio.run(connect_sdk())
 
+async def disconnect_sdk(sdk: BreezSdk):
+    try:
+       await sdk.disconnect()
+    except Exception as error:
+        print(error)
+        raise
+
+
+connection = asyncio.run(connect_sdk())
 print("Connected:", connection)
+
+asyncio.run(disconnect_sdk(connection))
+print("Disconnected:", connection)
 
 
 
