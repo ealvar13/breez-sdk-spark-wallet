@@ -47,6 +47,7 @@ async def fetch_balance(sdk: BreezSdk):
         # running the wallet in the background and want an accurate balance.
         info = await sdk.get_info(request=GetInfoRequest(ensure_synced=True))
         balance_sats = info.balance_sats
+        return balance_sats
     except Exception as error:
         print(error)
         raise
