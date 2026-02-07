@@ -1,7 +1,8 @@
 import os, asyncio
 from typing import cast
 from breez_sdk_spark import Seed, default_config, Network, connect, \
-    ConnectRequest, BreezSdk, GetInfoRequest, InputType
+    ConnectRequest, BreezSdk, GetInfoRequest, InputType, ReceivePaymentMethod, \
+    ReceivePaymentRequest
 
 from dotenv import load_dotenv
 
@@ -67,6 +68,25 @@ async def parse_input(sdk: BreezSdk, user_input: str):
         raise
 
 
+async def get_bolt11_invoice(sdk: BreezSdk, description: str, amount_sats: int):
+    try:
+        payment_method = ReceivePaymentMethod.BOLT11_INVOICE(
+            description=description,
+            amount_sats=amount_sats,
+            expiry_secs=3600
+        )
+        request = ReceivePaymentRequest(payment_method=payment_method)
+        response = await sdk.receive_payment(request=request)
+
+        payment_request = response.payment_request
+        print(f"Payment Request: {payment_request}")
+        receive_fee_sats = response.fee
+        print(f"Fees: {receive_fee_sats}")
+        return response
+    except Exception as error:
+        print(error)
+        raise
+
 connection = asyncio.run(connect_sdk())
 print("Connected:", connection)
 
@@ -78,6 +98,11 @@ print("Balance:", balance)
 payment_input = input("Enter a bitcoin address or BOLT11 invoice: ")
 asyncio.run(parse_input(connection, payment_input))
 print("Input parsing completed")
+
+print("Ready to generate bolt11 invoice...")
+bolt11_description = input("Enter an invoice description: ")
+bolt11_amount_sats = int(input("Enter an amount in satoshis: "))
+asyncio.run(get_bolt11_invoice(connection, bolt11_description, bolt11_amount_sats))
 
 asyncio.run(disconnect_sdk(connection))
 print("Disconnected:", connection)
