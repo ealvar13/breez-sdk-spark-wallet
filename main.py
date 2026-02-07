@@ -1,7 +1,7 @@
 import os, asyncio
 from typing import cast
 from breez_sdk_spark import Seed, default_config, Network, connect, \
-    ConnectRequest, BreezSdk, GetInfoRequest
+    ConnectRequest, BreezSdk, GetInfoRequest, InputType
 
 from dotenv import load_dotenv
 
@@ -18,7 +18,8 @@ seed = cast(Seed, Seed.MNEMONIC(mnemonic=seed_phrase, passphrase=None))
 config = default_config(network=Network.REGTEST)
 config.api_key = breez_api_key
 
-# TODO: Event handler
+# TODO ?: Event handler: https://sdk-doc-spark.breez.technology/guide/events.html
+# TODO ?: Logger: https://sdk-doc-spark.breez.technology/guide/logging.html
 
 async def connect_sdk():
     try:
@@ -51,6 +52,20 @@ async def fetch_balance(sdk: BreezSdk):
         raise
 
 
+async def parse_input(sdk: BreezSdk, user_input: str):
+    try:
+        parsed_input = await sdk.parse(input=user_input)
+        if isinstance(parsed_input, InputType.BITCOIN_ADDRESS):
+            details = parsed_input[0]
+            print(f"Input is Bitcoin address {details.address}")
+        elif isinstance(parsed_input, InputType.BOLT11_INVOICE):
+            details = parsed_input[0]
+            print(f"Input is BOLT11 invoice for {details.amount_msat} msats")
+    except Exception as error:
+        print(error)
+        raise
+
+
 connection = asyncio.run(connect_sdk())
 print("Connected:", connection)
 
@@ -58,6 +73,10 @@ print("Connected:", connection)
 print("Fetching balance...")
 balance = asyncio.run(fetch_balance(connection))
 print("Balance:", balance)
+
+payment_input = input("Enter a bitcoin address or BOLT11 invoice: ")
+asyncio.run(parse_input(connection, payment_input))
+print("Input parsing completed")
 
 asyncio.run(disconnect_sdk(connection))
 print("Disconnected:", connection)
