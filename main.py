@@ -70,11 +70,11 @@ async def parse_input(sdk: BreezSdk, user_input: str):
 
 async def get_bolt11_invoice(sdk: BreezSdk, description: str, amount_sats: int):
     try:
-        payment_method = ReceivePaymentMethod.BOLT11_INVOICE(
+        payment_method = cast(ReceivePaymentMethod, ReceivePaymentMethod.BOLT11_INVOICE(
             description=description,
             amount_sats=amount_sats,
             expiry_secs=3600
-        )
+        ))
         request = ReceivePaymentRequest(payment_method=payment_method)
         response = await sdk.receive_payment(request=request)
 
@@ -87,10 +87,30 @@ async def get_bolt11_invoice(sdk: BreezSdk, description: str, amount_sats: int):
         print(error)
         raise
 
+
+async def get_bitcoin_receive_address(sdk: BreezSdk):
+    try:
+        request = ReceivePaymentRequest(
+            payment_method=ReceivePaymentMethod.BITCOIN_ADDRESS()
+        )
+        response = await sdk.receive_payment(request=request)
+
+        payment_request = response.payment_request
+        print("Payment request: ", payment_request)
+        receive_fee_sats = response.fee
+        print(f"Fees: {receive_fee_sats} sats")
+
+        return response
+    except Exception as error:
+        print(error)
+        raise
+
+
 connection = asyncio.run(connect_sdk())
 print("Connected:", connection)
 
-# Dev note here - fetching the balance with the ensure_synced set to "True" is pretty slow.
+# Dev note here - fetching the balance with the ensure_synced set to "True"
+# is pretty slow.
 print("Fetching balance...")
 balance = asyncio.run(fetch_balance(connection))
 print("Balance:", balance)
@@ -103,6 +123,9 @@ print("Ready to generate bolt11 invoice...")
 bolt11_description = input("Enter an invoice description: ")
 bolt11_amount_sats = int(input("Enter an amount in satoshis: "))
 asyncio.run(get_bolt11_invoice(connection, bolt11_description, bolt11_amount_sats))
+
+print("Ready to generate a bitcoin address...")
+asyncio.run(get_bitcoin_receive_address(connection))
 
 asyncio.run(disconnect_sdk(connection))
 print("Disconnected:", connection)
