@@ -1,0 +1,2 @@
+breez-sdk-spark
+python-dotenv

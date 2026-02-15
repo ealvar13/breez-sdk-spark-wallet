@@ -2,7 +2,8 @@ import os, asyncio
 from typing import cast
 from breez_sdk_spark import Seed, default_config, Network, connect, \
     ConnectRequest, BreezSdk, GetInfoRequest, InputType, ReceivePaymentMethod, \
-    ReceivePaymentRequest, PrepareSendPaymentRequest, SendPaymentRequest
+    ReceivePaymentRequest, PrepareSendPaymentRequest, SendPaymentRequest, \
+    ListPaymentsRequest, GetPaymentRequest
 
 from dotenv import load_dotenv
 
@@ -204,6 +205,76 @@ async def send_onchain_payment(sdk: BreezSdk, address: str, amount_sats: int):
         raise
 
 
+async def list_payments(sdk: BreezSdk, limit: int = 10, offset: int = 0):
+    try:
+        request = ListPaymentsRequest(
+            offset=offset,
+            limit=limit,
+            sort_ascending=False  # Newest first
+        )
+        response = await sdk.list_payments(request=request)
+        
+        payments = response.payments
+        
+        if not payments:
+            print("No payments found.")
+            return response
+        
+        print(f"\nShowing {len(payments)} payment(s) (offset: {offset})")
+        print("="*80)
+        
+        for i, payment in enumerate(payments, start=offset + 1):
+            print(f"\n{i}. Payment ID: {payment.id}")
+            print(f"   Type: {payment.payment_type}")
+            print(f"   Status: {payment.status}")
+            print(f"   Amount: {payment.amount} sats")
+            print(f"   Fees: {payment.fees} sats")
+            print(f"   Method: {payment.method}")
+            # Format timestamp
+            from datetime import datetime
+            dt = datetime.fromtimestamp(payment.timestamp)
+            print(f"   Date: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+        print("="*80)
+        return response
+    except Exception as error:
+        print(error)
+        raise
+
+
+async def get_payment_details(sdk: BreezSdk, payment_id: str):
+    try:
+        request = GetPaymentRequest(payment_id=payment_id)
+        response = await sdk.get_payment(request=request)
+        payment = response.payment
+        
+        print("\n" + "="*80)
+        print("PAYMENT DETAILS")
+        print("="*80)
+        print(f"Payment ID: {payment.id}")
+        print(f"Type: {payment.payment_type}")
+        print(f"Status: {payment.status}")
+        print(f"Amount: {payment.amount} sats")
+        print(f"Fees: {payment.fees} sats")
+        print(f"Method: {payment.method}")
+        
+        # Format timestamp
+        from datetime import datetime
+        dt = datetime.fromtimestamp(payment.timestamp)
+        print(f"Date: {dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Show details if available
+        if payment.details:
+            print(f"\nAdditional Details:")
+            print(f"{payment.details}")
+        
+        print("="*80)
+        return response
+    except Exception as error:
+        print(error)
+        raise
+
+
 def display_menu():
     print("\n" + "="*50)
     print("BREEZ SDK WALLET - Main Menu")
@@ -214,7 +285,9 @@ def display_menu():
     print("4. Parse Payment Input (Bitcoin Address or BOLT11)")
     print("5. Send BOLT11 Payment")
     print("6. Send On-Chain Payment")
-    print("7. Exit")
+    print("7. List Payments (Paginated)")
+    print("8. Get Payment Details")
+    print("9. Exit")
     print("="*50)
 
 
@@ -228,7 +301,7 @@ async def main():
         # Main wallet loop
         while True:
             display_menu()
-            choice = input("\nEnter your choice (1-7): ").strip()
+            choice = input("\nEnter your choice (1-9): ").strip()
 
             if choice == "1":
                 # Get Balance
@@ -312,12 +385,46 @@ async def main():
                     print("✗ Invalid amount. Please enter a number.\n")
 
             elif choice == "7":
+                # List Payments (Paginated)
+                print("\n--- List Payments ---")
+                offset = 0
+                limit = 10
+                
+                while True:
+                    await list_payments(sdk, limit=limit, offset=offset)
+                    
+                    print("\nOptions: [N]ext page, [P]revious page, [B]ack to menu")
+                    nav = input("Enter choice: ").strip().upper()
+                    
+                    if nav == "N":
+                        offset += limit
+                    elif nav == "P":
+                        offset = max(0, offset - limit)
+                    elif nav == "B":
+                        break
+                    else:
+                        print("Invalid option. Returning to menu.")
+                        break
+
+            elif choice == "8":
+                # Get Payment Details
+                print("\n--- Get Payment Details ---")
+                payment_id = input("Enter Payment ID: ").strip()
+                if payment_id:
+                    try:
+                        await get_payment_details(sdk, payment_id)
+                    except Exception as e:
+                        print(f"✗ Error: {e}\n")
+                else:
+                    print("✗ Payment ID is required.\n")
+
+            elif choice == "9":
                 # Exit
                 print("\nExiting wallet...")
                 break
 
             else:
-                print("\n✗ Invalid choice. Please enter a number between 1 and 7.\n")
+                print("\n✗ Invalid choice. Please enter a number between 1 and 9.\n")
 
     except Exception as error:
         print(f"\n✗ Error: {error}")
