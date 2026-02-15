@@ -2,7 +2,7 @@ import os, asyncio
 from typing import cast
 from breez_sdk_spark import Seed, default_config, Network, connect, \
     ConnectRequest, BreezSdk, GetInfoRequest, InputType, ReceivePaymentMethod, \
-    ReceivePaymentRequest
+    ReceivePaymentRequest, PrepareSendPaymentRequest, SendPaymentRequest
 
 from dotenv import load_dotenv
 
@@ -10,13 +10,19 @@ load_dotenv()
 
 breez_api_key = os.getenv("BREEZ_API_KEY", "")
 seed_phrase = os.getenv("SEED_PHRASE")
+network_env = os.getenv("NETWORK", "REGTEST").upper()
+
+# Map environment variable to Network enum
+if network_env == "MAINNET":
+    network = Network.MAINNET
+else:
+    network = Network.REGTEST  # Default to REGTEST for safety
 
 # Breez SDK Spark typing: Seed.MNEMONIC is a valid Seed at runtime,
 # but the Python stubs don't model the union correctly.
 seed = cast(Seed, Seed.MNEMONIC(mnemonic=seed_phrase, passphrase=None))
 
-# TODO: Network env variable
-config = default_config(network=Network.REGTEST)
+config = default_config(network=network)
 config.api_key = breez_api_key
 
 # TODO ?: Event handler: https://sdk-doc-spark.breez.technology/guide/events.html
@@ -24,6 +30,14 @@ config.api_key = breez_api_key
 
 async def connect_sdk():
     try:
+        network_name = "MAINNET" if network == Network.MAINNET else "REGTEST"
+        print(f"Welcome to your spark wallet!")
+        print(f"Network: {network_name}")
+        if network == Network.REGTEST:
+            print("💡 Get test coins: https://app.lightspark.com/regtest-faucet")
+        else:
+            print("⚠️  WARNING: Using MAINNET - Real Bitcoin!")
+        
         # Connect using simplified(?) connect method
         sdk = await connect(
             request=ConnectRequest(config=config, seed=seed, storage_dir="./.data")
@@ -106,29 +120,214 @@ async def get_bitcoin_receive_address(sdk: BreezSdk):
         raise
 
 
-connection = asyncio.run(connect_sdk())
-print("Connected:", connection)
+async def send_bolt11_payment(sdk: BreezSdk, bolt11: str, amount_sats: int = None):
+    try:
+        # Parse the invoice first to check if it has an amount
+        parsed_input = await sdk.parse(input=bolt11)
+        
+        invoice_amount_sats = None
+        if isinstance(parsed_input, InputType.BOLT11_INVOICE):
+            details = parsed_input[0]
+            if details.amount_msat and details.amount_msat > 0:
+                invoice_amount_sats = details.amount_msat // 1000
+                print(f"Invoice Amount: {invoice_amount_sats} sats")
+                # If invoice has an amount, ignore user-provided amount
+                amount_sats = None
+            else:
+                print("Zero-amount invoice detected")
+        
+        # Step 1: Prepare the payment
+        prepare_request = PrepareSendPaymentRequest(
+            payment_request=bolt11,
+            amount=amount_sats
+        )
+        prepare_response = await sdk.prepare_send_payment(request=prepare_request)
+        
+        print(f"Preparing payment...")
+        # Show fees from prepare response
+        if hasattr(prepare_response, 'fee'):
+            print(f"Estimated Fees: {prepare_response.fee} sats")
+        
+        # Step 2: Send the payment
+        send_request = SendPaymentRequest(
+            prepare_response=prepare_response,
+            options=None,
+            idempotency_key=None
+        )
+        response = await sdk.send_payment(request=send_request)
 
-# Dev note here - fetching the balance with the ensure_synced set to "True"
-# is pretty slow.
-print("Fetching balance...")
-balance = asyncio.run(fetch_balance(connection))
-print("Balance:", balance)
-
-payment_input = input("Enter a bitcoin address or BOLT11 invoice: ")
-asyncio.run(parse_input(connection, payment_input))
-print("Input parsing completed")
-
-print("Ready to generate bolt11 invoice...")
-bolt11_description = input("Enter an invoice description: ")
-bolt11_amount_sats = int(input("Enter an amount in satoshis: "))
-asyncio.run(get_bolt11_invoice(connection, bolt11_description, bolt11_amount_sats))
-
-print("Ready to generate a bitcoin address...")
-asyncio.run(get_bitcoin_receive_address(connection))
-
-asyncio.run(disconnect_sdk(connection))
-print("Disconnected:", connection)
+        payment = response.payment
+        print(f"Payment ID: {payment.id}")
+        if hasattr(payment, 'payment_hash'):
+            print(f"Payment Hash: {payment.payment_hash}")
+        print(f"Amount: {payment.amount} sats")
+        print(f"Fee: {payment.fees} sats")
+        print(f"Status: {payment.status}")
+        return response
+    except Exception as error:
+        print(error)
+        raise
 
 
+async def send_onchain_payment(sdk: BreezSdk, address: str, amount_sats: int):
+    try:
+        # Step 1: Prepare the payment
+        prepare_request = PrepareSendPaymentRequest(
+            payment_request=address,
+            amount=amount_sats
+        )
+        prepare_response = await sdk.prepare_send_payment(request=prepare_request)
+        
+        print(f"Preparing payment...")
+        # Show fees from prepare response
+        if hasattr(prepare_response, 'fee'):
+            print(f"Estimated Fees: {prepare_response.fee} sats")
+        
+        # Step 2: Send the payment
+        send_request = SendPaymentRequest(
+            prepare_response=prepare_response,
+            options=None,
+            idempotency_key=None
+        )
+        response = await sdk.send_payment(request=send_request)
 
+        payment = response.payment
+        print(f"Payment ID: {payment.id}")
+        if hasattr(payment.details, '__dict__') and hasattr(payment.details, 'txid'):
+            print(f"Transaction ID: {payment.details.txid}")
+        print(f"Amount: {payment.amount} sats")
+        print(f"Fee: {payment.fees} sats")
+        print(f"Status: {payment.status}")
+        return response
+    except Exception as error:
+        print(error)
+        raise
+
+
+def display_menu():
+    print("\n" + "="*50)
+    print("BREEZ SDK WALLET - Main Menu")
+    print("="*50)
+    print("1. Get Balance")
+    print("2. Get BOLT11 Invoice")
+    print("3. Get On-Chain Receive Address")
+    print("4. Parse Payment Input (Bitcoin Address or BOLT11)")
+    print("5. Send BOLT11 Payment")
+    print("6. Send On-Chain Payment")
+    print("7. Exit")
+    print("="*50)
+
+
+async def main():
+    sdk = None
+    try:
+        # Connect to SDK
+        sdk = await connect_sdk()
+        print("✓ Successfully connected to Breez SDK\n")
+
+        # Main wallet loop
+        while True:
+            display_menu()
+            choice = input("\nEnter your choice (1-7): ").strip()
+
+            if choice == "1":
+                # Get Balance
+                print("\nFetching balance...")
+                balance = await fetch_balance(sdk)
+                print(f"✓ Balance: {balance:,} sats\n")
+
+            elif choice == "2":
+                # Get BOLT11 Invoice
+                print("\n--- Generate BOLT11 Invoice ---")
+                description = input("Enter invoice description: ")
+                try:
+                    amount_sats = int(input("Enter amount in satoshis: "))
+                    print("\nGenerating invoice...")
+                    await get_bolt11_invoice(sdk, description, amount_sats)
+                    print("✓ Invoice generated successfully!\n")
+                except ValueError:
+                    print("✗ Invalid amount. Please enter a number.\n")
+
+            elif choice == "3":
+                # Get Bitcoin Receive Address
+                print("\n--- Generate Bitcoin Receive Address ---")
+                await get_bitcoin_receive_address(sdk)
+                print("✓ Address generated successfully!\n")
+
+            elif choice == "4":
+                # Parse Input
+                print("\n--- Parse Payment Input ---")
+                payment_input = input("Enter a Bitcoin address or BOLT11 invoice: ")
+                await parse_input(sdk, payment_input)
+                print("✓ Input parsed successfully!\n")
+
+            elif choice == "5":
+                # Send BOLT11 Payment
+                print("\n--- Send BOLT11 Payment ---")
+                bolt11 = input("Enter BOLT11 invoice: ")
+                
+                # Parse invoice first to check if it has an amount
+                try:
+                    parsed_input = await sdk.parse(input=bolt11)
+                    invoice_has_amount = False
+                    
+                    if isinstance(parsed_input, InputType.BOLT11_INVOICE):
+                        details = parsed_input[0]
+                        if details.amount_msat and details.amount_msat > 0:
+                            invoice_amount_sats = details.amount_msat // 1000
+                            print(f"Invoice contains amount: {invoice_amount_sats} sats")
+                            invoice_has_amount = True
+                        else:
+                            print("This is a zero-amount invoice")
+                    
+                    # Only ask for amount if invoice doesn't have one
+                    amount_sats = None
+                    if not invoice_has_amount:
+                        amount_input = input("Enter amount in satoshis: ").strip()
+                        try:
+                            amount_sats = int(amount_input) if amount_input else None
+                            if amount_sats is None:
+                                print("✗ Amount is required for zero-amount invoices.\n")
+                                continue
+                        except ValueError:
+                            print("✗ Invalid amount. Please enter a number.\n")
+                            continue
+                    
+                    print("\nSending payment...")
+                    await send_bolt11_payment(sdk, bolt11, amount_sats)
+                    print("✓ Payment sent successfully!\n")
+                except Exception as e:
+                    print(f"✗ Error: {e}\n")
+
+            elif choice == "6":
+                # Send On-Chain Payment
+                print("\n--- Send On-Chain Payment ---")
+                address = input("Enter Bitcoin address: ")
+                try:
+                    amount_sats = int(input("Enter amount in satoshis: "))
+                    print("\nSending payment...")
+                    await send_onchain_payment(sdk, address, amount_sats)
+                    print("✓ Payment sent successfully!\n")
+                except ValueError:
+                    print("✗ Invalid amount. Please enter a number.\n")
+
+            elif choice == "7":
+                # Exit
+                print("\nExiting wallet...")
+                break
+
+            else:
+                print("\n✗ Invalid choice. Please enter a number between 1 and 7.\n")
+
+    except Exception as error:
+        print(f"\n✗ Error: {error}")
+    finally:
+        # Disconnect from SDK
+        if sdk:
+            await disconnect_sdk(sdk)
+            print("✓ Disconnected from Breez SDK")
+            print("\nThank you for using Breez SDK Wallet!")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
