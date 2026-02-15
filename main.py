@@ -1,9 +1,10 @@
 import os, asyncio
 from typing import cast
 from breez_sdk_spark import Seed, default_config, Network, connect, \
+    CheckLightningAddressRequest, RegisterLightningAddressRequest, \
     ConnectRequest, BreezSdk, GetInfoRequest, InputType, ReceivePaymentMethod, \
-    ReceivePaymentRequest, PrepareSendPaymentRequest, SendPaymentRequest, \
-    ListPaymentsRequest, GetPaymentRequest
+    ReceivePaymentRequest, PrepareLnurlPayRequest, PrepareSendPaymentRequest, \
+    SendPaymentRequest, LnurlPayRequest, ListPaymentsRequest, GetPaymentRequest
 
 from dotenv import load_dotenv
 
@@ -12,6 +13,7 @@ load_dotenv()
 breez_api_key = os.getenv("BREEZ_API_KEY", "")
 seed_phrase = os.getenv("SEED_PHRASE")
 network_env = os.getenv("NETWORK", "REGTEST").upper()
+lnurl_domain = os.getenv("LNURL_DOMAIN")
 
 # Map environment variable to Network enum
 if network_env == "MAINNET":
@@ -25,6 +27,8 @@ seed = cast(Seed, Seed.MNEMONIC(mnemonic=seed_phrase, passphrase=None))
 
 config = default_config(network=network)
 config.api_key = breez_api_key
+if lnurl_domain:
+    config.lnurl_domain = lnurl_domain
 
 # TODO ?: Event handler: https://sdk-doc-spark.breez.technology/guide/events.html
 # TODO ?: Logger: https://sdk-doc-spark.breez.technology/guide/logging.html
@@ -78,6 +82,14 @@ async def parse_input(sdk: BreezSdk, user_input: str):
         elif isinstance(parsed_input, InputType.BOLT11_INVOICE):
             details = parsed_input[0]
             print(f"Input is BOLT11 invoice for {details.amount_msat} msats")
+        elif isinstance(parsed_input, InputType.LIGHTNING_ADDRESS):
+            details = parsed_input[0]
+            address = None
+            if hasattr(details, "address"):
+                address = details.address
+            elif hasattr(details, "pay_request") and hasattr(details.pay_request, "address"):
+                address = details.pay_request.address
+            print(f"Input is Lightning address {address or 'unknown'}")
     except Exception as error:
         print(error)
         raise
@@ -275,6 +287,117 @@ async def get_payment_details(sdk: BreezSdk, payment_id: str):
         raise
 
 
+async def check_lightning_address_available(sdk: BreezSdk, username: str):
+    try:
+        request = CheckLightningAddressRequest(username=username)
+        available = await sdk.check_lightning_address_available(request)
+        if available:
+            print(f"✓ Lightning address '{username}' is available")
+        else:
+            print(f"✗ Lightning address '{username}' is taken")
+        return available
+    except Exception as error:
+        print(error)
+        raise
+
+
+async def register_lightning_address(sdk: BreezSdk, username: str, description: str = None):
+    try:
+        request = RegisterLightningAddressRequest(
+            username=username,
+            description=description if description else None
+        )
+        address_info = await sdk.register_lightning_address(request)
+        print(f"Lightning Address: {address_info.lightning_address}")
+        lnurl_info = address_info.lnurl
+        if isinstance(lnurl_info, str):
+            print(f"LNURL (URL): {lnurl_info}")
+        else:
+            print(f"LNURL (URL): {lnurl_info.url}")
+            print(f"LNURL (bech32): {lnurl_info.bech32}")
+        return address_info
+    except Exception as error:
+        print(error)
+        raise
+
+
+async def get_lightning_address(sdk: BreezSdk):
+    try:
+        address_info = await sdk.get_lightning_address()
+        if address_info is None:
+            print("No Lightning address registered.")
+            return None
+        print(f"Lightning Address: {address_info.lightning_address}")
+        print(f"Username: {address_info.username}")
+        print(f"Description: {address_info.description}")
+        lnurl_info = address_info.lnurl
+        if isinstance(lnurl_info, str):
+            print(f"LNURL (URL): {lnurl_info}")
+        else:
+            print(f"LNURL (URL): {lnurl_info.url}")
+            print(f"LNURL (bech32): {lnurl_info.bech32}")
+        return address_info
+    except Exception as error:
+        print(error)
+        raise
+
+
+async def delete_lightning_address(sdk: BreezSdk):
+    try:
+        await sdk.delete_lightning_address()
+        print("✓ Lightning address deleted")
+    except Exception as error:
+        print(error)
+        raise
+
+
+async def send_lightning_address_payment(
+    sdk: BreezSdk,
+    lightning_address: str,
+    amount_sats: int,
+    comment: str = None,
+):
+    try:
+        parsed_input = await sdk.parse(input=lightning_address)
+        if not isinstance(parsed_input, InputType.LIGHTNING_ADDRESS):
+            print("✗ Input is not a Lightning address")
+            return None
+
+        details = parsed_input[0]
+        prepare_request = PrepareLnurlPayRequest(
+            amount_sats=amount_sats,
+            pay_request=details.pay_request,
+            comment=comment if comment else None,
+            validate_success_action_url=True,
+            conversion_options=None,
+            fee_policy=None,
+        )
+        prepare_response = await sdk.prepare_lnurl_pay(request=prepare_request)
+
+        fee_sats = getattr(prepare_response, "fee_sats", None)
+        if fee_sats is None:
+            fee_sats = getattr(prepare_response, "fee", None)
+        if fee_sats is not None:
+            print(f"Estimated Fees: {fee_sats} sats")
+
+        response = await sdk.lnurl_pay(
+            LnurlPayRequest(
+                prepare_response=prepare_response,
+                idempotency_key=None,
+            )
+        )
+
+        payment = response.payment
+        print(f"Payment ID: {payment.id}")
+        print(f"Amount: {payment.amount} sats")
+        print(f"Fee: {payment.fees} sats")
+        print(f"Status: {payment.status}")
+        return response
+    except Exception as error:
+        print(error)
+        raise
+
+
 def display_menu():
     print("\n" + "="*50)
     print("BREEZ SDK WALLET - Main Menu")
@@ -287,7 +410,12 @@ def display_menu():
     print("6. Send On-Chain Payment")
     print("7. List Payments (Paginated)")
     print("8. Get Payment Details")
-    print("9. Exit")
+    print("9. Check Lightning Address Availability")
+    print("10. Register Lightning Address")
+    print("11. Get Lightning Address")
+    print("12. Delete Lightning Address")
+    print("13. Send Lightning Address Payment")
+    print("14. Exit")
     print("="*50)
 
 
@@ -301,7 +429,7 @@ async def main():
         # Main wallet loop
         while True:
             display_menu()
-            choice = input("\nEnter your choice (1-9): ").strip()
+            choice = input("\nEnter your choice (1-14): ").strip()
 
             if choice == "1":
                 # Get Balance
@@ -419,12 +547,75 @@ async def main():
                     print("✗ Payment ID is required.\n")
 
             elif choice == "9":
+                # Check Lightning Address Availability
+                print("\n--- Check Lightning Address Availability ---")
+                username = input("Enter desired username: ").strip()
+                if username:
+                    await check_lightning_address_available(sdk, username)
+                else:
+                    print("✗ Username is required.\n")
+
+            elif choice == "10":
+                # Register Lightning Address
+                print("\n--- Register Lightning Address ---")
+                username = input("Enter username: ").strip()
+                description = input("Enter description (optional): ").strip()
+                if username:
+                    await register_lightning_address(
+                        sdk,
+                        username,
+                        description if description else None,
+                    )
+                    print("✓ Lightning address registered!\n")
+                else:
+                    print("✗ Username is required.\n")
+
+            elif choice == "11":
+                # Get Lightning Address
+                print("\n--- Get Lightning Address ---")
+                await get_lightning_address(sdk)
+                print("✓ Done.\n")
+
+            elif choice == "12":
+                # Delete Lightning Address
+                print("\n--- Delete Lightning Address ---")
+                confirm = input("Type 'delete' to confirm: ").strip().lower()
+                if confirm == "delete":
+                    await delete_lightning_address(sdk)
+                    print("✓ Deleted.\n")
+                else:
+                    print("✗ Delete cancelled.\n")
+
+            elif choice == "13":
+                # Send Lightning Address Payment
+                print("\n--- Send Lightning Address Payment ---")
+                lightning_address = input("Enter Lightning address: ").strip()
+                if not lightning_address:
+                    print("✗ Lightning address is required.\n")
+                    continue
+                amount_input = input("Enter amount in satoshis: ").strip()
+                try:
+                    amount_sats = int(amount_input)
+                except ValueError:
+                    print("✗ Invalid amount. Please enter a number.\n")
+                    continue
+                comment = input("Enter comment (optional): ").strip()
+                print("\nSending payment...")
+                await send_lightning_address_payment(
+                    sdk,
+                    lightning_address,
+                    amount_sats,
+                    comment if comment else None,
+                )
+                print("✓ Payment sent successfully!\n")
+
+            elif choice == "14":
                 # Exit
                 print("\nExiting wallet...")
                 break
 
             else:
-                print("\n✗ Invalid choice. Please enter a number between 1 and 9.\n")
+                print("\n✗ Invalid choice. Please enter a number between 1 and 14.\n")
 
     except Exception as error:
         print(f"\n✗ Error: {error}")
